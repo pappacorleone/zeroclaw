@@ -2637,6 +2637,7 @@ impl Config {
         };
 
         let config_path = zeroclaw_dir.join("config.toml");
+        tracing::info!(path = %config_path.display(), "Config loaded");
 
         fs::create_dir_all(&zeroclaw_dir).context("Failed to create config directory")?;
         fs::create_dir_all(&workspace_dir).context("Failed to create workspace directory")?;
