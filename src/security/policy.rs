@@ -317,6 +317,10 @@ impl SecurityPolicy {
 
         let risk = self.command_risk_level(command);
 
+        if self.autonomy == AutonomyLevel::Full {
+            return Ok(risk);
+        }
+
         if risk == CommandRiskLevel::High {
             if self.block_high_risk_commands {
                 return Err("Command blocked: high-risk command is disallowed by policy".into());
@@ -356,7 +360,24 @@ impl SecurityPolicy {
             return false;
         }
 
-        // Block subshell/expansion operators — these allow hiding arbitrary
+        // Full autonomy: validate only the base command against the allowlist.
+        // Skip shell-operator guards (subshell, redirect, semicolon/pipe
+        // splitting) which produce false positives on quoted arguments
+        // (e.g. sqlite3 db "...;...").
+        if self.autonomy == AutonomyLevel::Full {
+            let cmd_part = skip_env_assignments(command.trim());
+            let base_raw = cmd_part.split_whitespace().next().unwrap_or("");
+            let base_cmd = base_raw.rsplit('/').next().unwrap_or("");
+            if base_cmd.is_empty() {
+                return false;
+            }
+            return self
+                .allowed_commands
+                .iter()
+                .any(|allowed| allowed == base_cmd);
+        }
+
+        // Block subshell/expansion operators— these allow hiding arbitrary
         // commands inside an allowed command (e.g. `echo $(rm -rf /)`)
         if command.contains('`')
             || command.contains("$(")
@@ -1494,6 +1515,69 @@ mod tests {
         assert!(
             !policy.is_path_allowed("subdir%2f..%2f..%2fetc"),
             "URL-encoded parent dir traversal must be blocked"
+        );
+    }
+
+    // ── Full autonomy: shell operator bypass (#851) ─────────
+
+    #[test]
+    fn full_autonomy_allows_quoted_semicolons() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            allowed_commands: vec!["sqlite3".into()],
+            ..SecurityPolicy::default()
+        };
+        assert!(p.is_command_allowed(
+            r#"sqlite3 /tmp/test.db "CREATE TABLE t(id INT); INSERT INTO t VALUES(1);""#
+        ));
+    }
+
+    #[test]
+    fn full_autonomy_allows_redirects() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            allowed_commands: vec!["echo".into()],
+            ..SecurityPolicy::default()
+        };
+        assert!(p.is_command_allowed("echo hello > output.txt"));
+    }
+
+    #[test]
+    fn full_autonomy_blocks_unlisted_commands() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            allowed_commands: vec!["ls".into()],
+            ..SecurityPolicy::default()
+        };
+        assert!(!p.is_command_allowed("rm -rf /"));
+        assert!(!p.is_command_allowed("curl http://evil.com"));
+    }
+
+    #[test]
+    fn full_autonomy_validate_skips_risk_gating() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            allowed_commands: vec!["rm".into()],
+            block_high_risk_commands: true,
+            ..SecurityPolicy::default()
+        };
+        let result = p.validate_command_execution("rm -rf /tmp/test", false);
+        assert!(result.is_ok(), "Full autonomy should skip risk gating");
+        assert_eq!(result.unwrap(), CommandRiskLevel::High);
+    }
+
+    #[test]
+    fn full_autonomy_validate_skips_medium_approval() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            allowed_commands: vec!["touch".into()],
+            require_approval_for_medium_risk: true,
+            ..SecurityPolicy::default()
+        };
+        let result = p.validate_command_execution("touch test.txt", false);
+        assert!(
+            result.is_ok(),
+            "Full autonomy should not require approval for medium-risk"
         );
     }
 }
