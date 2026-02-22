@@ -511,6 +511,38 @@ impl ComposioTool {
         })
     }
 
+    /// Fetch full metadata for a single tool by slug, including input/output parameter schemas.
+    ///
+    /// Calls `GET /api/v3/tools/{tool_slug}` which returns the detailed schema
+    /// the LLM needs to construct correct `params` for `execute`.
+    pub async fn get_tool_schema(
+        &self,
+        tool_slug: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let slug = normalize_tool_slug(tool_slug);
+        let url = format!("{COMPOSIO_API_BASE_V3}/tools/{slug}");
+        ensure_https(&url)?;
+
+        let resp = self
+            .client()
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .query(&[("version", COMPOSIO_TOOL_VERSION_LATEST)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 tool schema lookup failed for '{slug}': {err}");
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 tool schema response")?;
+        Ok(body)
+    }
+
     async fn resolve_auth_config_id(&self, app_name: &str) -> anyhow::Result<String> {
         let url = format!("{COMPOSIO_API_BASE_V3}/auth_configs");
 
@@ -562,9 +594,11 @@ impl Tool for ComposioTool {
     fn description(&self) -> &str {
         "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). \
          Use action='list' to see available actions, \
+         action='describe' with tool_slug to get the full parameter schema before calling execute, \
          action='list_accounts' or action='connected_accounts' to list OAuth-connected accounts after login, \
          action='execute' with action_name/tool_slug and params (connected_account_id auto-resolved when omitted), \
-         or action='connect' with app/auth_config_id to get OAuth URL."
+         or action='connect' with app/auth_config_id to get OAuth URL. \
+         IMPORTANT: always call action='describe' before action='execute' to learn the correct parameters."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -573,8 +607,8 @@ impl Tool for ComposioTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "The operation: 'list' (list available actions), 'list_accounts'/'connected_accounts' (list connected accounts), 'execute' (run an action), or 'connect' (get OAuth URL)",
-                    "enum": ["list", "list_accounts", "connected_accounts", "execute", "connect"]
+                    "description": "The operation: 'list' (list available actions), 'describe' (get full parameter schema for a tool), 'list_accounts'/'connected_accounts' (list connected accounts), 'execute' (run an action), or 'connect' (get OAuth URL). Always use 'describe' before 'execute' to learn the correct parameters.",
+                    "enum": ["list", "describe", "list_accounts", "connected_accounts", "execute", "connect"]
                 },
                 "app": {
                     "type": "string",
@@ -629,17 +663,33 @@ impl Tool for ComposioTool {
                             .iter()
                             .take(20)
                             .map(|a| {
+                                let params_hint = a
+                                    .input_parameters
+                                    .as_ref()
+                                    .and_then(|v| v.get("properties"))
+                                    .and_then(|v| v.as_object())
+                                    .map(|props| {
+                                        let keys: Vec<&str> =
+                                            props.keys().map(String::as_str).collect();
+                                        if keys.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(" [params: {}]", keys.join(", "))
+                                        }
+                                    })
+                                    .unwrap_or_default();
                                 format!(
-                                    "- {} ({}): {}",
+                                    "- {} ({}): {}{}",
                                     a.name,
                                     a.app_name.as_deref().unwrap_or("?"),
-                                    a.description.as_deref().unwrap_or("")
+                                    a.description.as_deref().unwrap_or(""),
+                                    params_hint,
                                 )
                             })
                             .collect();
                         let total = actions.len();
                         let output = format!(
-                            "Found {total} available actions:\n{}{}",
+                            "Found {total} available actions (use action='describe' with tool_slug to see full parameter schema before executing):\n{}{}",
                             summary.join("\n"),
                             if total > 20 {
                                 format!("\n... and {} more", total - 20)
@@ -707,6 +757,63 @@ impl Tool for ComposioTool {
                         success: false,
                         output: String::new(),
                         error: Some(format!("Failed to list connected accounts: {e}")),
+                    }),
+                }
+            }
+
+            "describe" => {
+                let tool_slug = args
+                    .get("tool_slug")
+                    .or_else(|| args.get("action_name"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Missing 'tool_slug' (or 'action_name') for describe")
+                    })?;
+
+                match self.get_tool_schema(tool_slug).await {
+                    Ok(schema) => {
+                        let name = schema
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(tool_slug);
+                        let slug = schema
+                            .get("slug")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(tool_slug);
+                        let desc = schema
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        let mut output = format!("Tool: {name} (slug: {slug})\n");
+                        if !desc.is_empty() {
+                            let _ = writeln!(output, "Description: {desc}");
+                        }
+
+                        if let Some(input_params) = schema.get("input_parameters") {
+                            let formatted = serde_json::to_string_pretty(input_params)
+                                .unwrap_or_else(|_| format!("{input_params}"));
+                            let _ = writeln!(output, "\nInput parameters:\n{formatted}");
+                        } else {
+                            let _ = writeln!(output, "\nNo input parameters documented.");
+                        }
+
+                        if let Some(output_params) = schema.get("output_parameters") {
+                            let formatted = serde_json::to_string_pretty(output_params)
+                                .unwrap_or_else(|_| format!("{output_params}"));
+                            let _ = writeln!(output, "\nOutput parameters:\n{formatted}");
+                        }
+
+                        Ok(ToolResult {
+                            success: true,
+                            output,
+                            error: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to get tool schema: {e}")),
                     }),
                 }
             }
@@ -810,7 +917,7 @@ impl Tool for ComposioTool {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "Unknown action '{action}'. Use 'list', 'list_accounts', 'execute', or 'connect'."
+                    "Unknown action '{action}'. Use 'list', 'describe', 'list_accounts', 'execute', or 'connect'."
                 )),
             }),
         }
@@ -911,6 +1018,7 @@ fn map_v3_tools_to_actions(items: Vec<ComposioV3Tool>) -> Vec<ComposioAction> {
                 app_name,
                 description,
                 enabled: true,
+                input_parameters: item.input_parameters,
             })
         })
         .collect()
@@ -1063,6 +1171,10 @@ struct ComposioV3Tool {
     app_name: Option<String>,
     #[serde(default)]
     toolkit: Option<ComposioToolkitRef>,
+    #[serde(default)]
+    input_parameters: Option<serde_json::Value>,
+    #[serde(default)]
+    output_parameters: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1112,6 +1224,9 @@ pub struct ComposioAction {
     pub description: Option<String>,
     #[serde(default)]
     pub enabled: bool,
+    /// Input parameter schema returned by the v3 API (absent from v2 responses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_parameters: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
