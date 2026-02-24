@@ -144,8 +144,22 @@ pub struct JsonlSession {
 
 impl JsonlSession {
     /// Create a new JSONL session. The file is stored at `dir/{id}.jsonl`.
+    ///
+    /// The `id` is sanitized to prevent path traversal — only alphanumeric
+    /// characters, hyphens, and underscores are kept; everything else is
+    /// replaced with `_`.
     pub fn new(id: &str, dir: &Path) -> Self {
-        let path = dir.join(format!("{id}.jsonl"));
+        let safe_id: String = id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = dir.join(format!("{safe_id}.jsonl"));
         let history = Self::load_from_file(&path).unwrap_or_default();
         Self {
             id: id.to_string(),
