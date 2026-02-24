@@ -25,6 +25,7 @@ pub mod ollama;
 pub mod openai;
 pub mod openai_codex;
 pub mod openrouter;
+pub mod registry;
 pub mod reliable;
 pub mod router;
 pub mod telnyx;

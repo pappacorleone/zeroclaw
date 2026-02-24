@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod none;
 #[cfg(feature = "memory-postgres")]
 pub mod postgres;
+pub mod registry;
 pub mod response_cache;
 pub mod snapshot;
 pub mod sqlite;

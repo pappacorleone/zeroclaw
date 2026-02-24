@@ -1,5 +1,6 @@
 #[allow(clippy::module_inception)]
 pub mod agent;
+pub mod brain;
 pub mod classifier;
 pub mod dispatcher;
 pub mod loop_;
@@ -11,5 +12,10 @@ mod tests;
 
 #[allow(unused_imports)]
 pub use agent::{Agent, AgentBuilder};
+#[allow(unused_imports)]
+pub use brain::{
+    AgenticBrain, Brain, BrainCapabilities, BrainContext, BrainInput, BrainOutput, SimpleBrain,
+    StopReason,
+};
 #[allow(unused_imports)]
 pub use loop_::{process_message, run};

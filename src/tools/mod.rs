@@ -44,6 +44,7 @@ pub mod model_routing_config;
 pub mod pdf_read;
 pub mod proxy_config;
 pub mod pushover;
+pub mod registry;
 pub mod schedule;
 pub mod schema;
 pub mod screenshot;
