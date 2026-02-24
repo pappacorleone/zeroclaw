@@ -228,9 +228,10 @@ impl Session for JsonlSession {
     }
 
     async fn append(&self, message: ConversationMessage) -> anyhow::Result<()> {
-        // Append to file first (durable), then update cache
+        // Acquire lock first to keep file and cache in sync under concurrency
+        let mut guard = self.history.write().await;
         self.append_to_file(&message)?;
-        self.history.write().await.push(message);
+        guard.push(message);
         Ok(())
     }
 
@@ -278,8 +279,9 @@ impl Session for JsonlSession {
     }
 
     async fn clear(&self) -> anyhow::Result<()> {
-        self.history.write().await.clear();
-        // Truncate the file
+        let mut guard = self.history.write().await;
+        guard.clear();
+        // Truncate the file while still holding the lock
         if self.path.exists() {
             std::fs::write(&self.path, "")?;
         }
