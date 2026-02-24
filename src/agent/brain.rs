@@ -281,7 +281,7 @@ impl Brain for AgenticBrain {
             let mut results = Vec::with_capacity(calls.len());
             for call in &calls {
                 let start = Instant::now();
-                let result =
+                let (output, succeeded) =
                     if let Some(tool) = ctx.tool_registry.get(&call.name) {
                         match tool.execute(call.arguments.clone()).await {
                             Ok(r) => {
@@ -291,9 +291,9 @@ impl Brain for AgenticBrain {
                                     success: r.success,
                                 });
                                 if r.success {
-                                    r.output
+                                    (r.output, true)
                                 } else {
-                                    format!("Error: {}", r.error.unwrap_or(r.output))
+                                    (format!("Error: {}", r.error.unwrap_or(r.output)), false)
                                 }
                             }
                             Err(e) => {
@@ -302,17 +302,17 @@ impl Brain for AgenticBrain {
                                     duration: start.elapsed(),
                                     success: false,
                                 });
-                                format!("Error executing {}: {e}", call.name)
+                                (format!("Error executing {}: {e}", call.name), false)
                             }
                         }
                     } else {
-                        format!("Unknown tool: {}", call.name)
+                        (format!("Unknown tool: {}", call.name), false)
                     };
 
                 results.push(super::dispatcher::ToolExecutionResult {
                     name: call.name.clone(),
-                    output: result,
-                    success: true,
+                    output,
+                    success: succeeded,
                     tool_call_id: call.tool_call_id.clone(),
                 });
                 tool_calls_executed += 1;
